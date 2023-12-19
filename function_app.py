@@ -44,7 +44,7 @@ def makePrediction(myTimer: func.TimerRequest) -> None:
         latest_data_df = latest_data_df.drop(columns='timestamp')
 
         predictions = make_prediction(model, latest_data_df, last_timestamp)
-        predictions["square_id"] = folder.split('/')[0]
+        predictions["squareUUID"] = folder.split('/')[0]
         send_predictions_to_BA(predictions)
 
 
@@ -170,7 +170,13 @@ def make_prediction(model, latest_data_df, last_timestamp):
     predictions_final_df = prediction_df.iloc[indices_to_select]
 
     time_made = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    predictions_final_df["time_made"] = time_made
+    predictions_final_df["timeMade"] = time_made
+
+    columns_to_drop = ['PEDESTRIAN', 'BIKE', 'V85', 'HEAVY']
+    columns_to_drop_existing = [col for col in columns_to_drop if col in predictions_final_df.columns]
+
+    if columns_to_drop_existing:
+        predictions_final_df = predictions_final_df.drop(columns=columns_to_drop_existing)
     return predictions_final_df
 
 # event header class
@@ -184,6 +190,7 @@ class EventHeader:
 
 
 def send_predictions_to_BA(predictions):
+    df_melted = pd.melt(predictions, id_vars=['timestamp', 'timeMade', 'squareUUID'], var_name='valueType', value_name='value')
     # connect to rabbitmq using the right credentials
     connection_params = pika.ConnectionParameters(
         host='localhost',
@@ -200,9 +207,8 @@ def send_predictions_to_BA(predictions):
     channel.queue_declare(queue=queue_name, durable=True)
         
     # convert the dataframe to dict
-    predictions['timestamp'] = predictions['timestamp'].astype(str)
-    data_list = predictions.to_dict(orient='records')
-    print(data_list)
+    df_melted['timestamp'] = df_melted['timestamp'].astype(str)
+    data_list = df_melted.to_dict(orient='records')
 
     # create the event message
     event_header = EventHeader(uuid.uuid4(), EventCatalog.NEW_PREDICTION_DATA)
