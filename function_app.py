@@ -3,7 +3,6 @@ import azure.functions as func
 from azure.storage.blob import BlobServiceClient
 from io import StringIO
 import pandas as pd
-import pickle
 from sklearn.preprocessing import StandardScaler
 import numpy as np
 from datetime import datetime
@@ -11,10 +10,14 @@ import pika
 import json
 import uuid
 from enum import Enum
+import h5py
+from io import BytesIO
+from keras.models import load_model
 
 app = func.FunctionApp()
 
-@app.schedule(schedule="* */15 * * *", arg_name="myTimer", run_on_startup=True,
+@app.function_name("makePrediction")
+@app.schedule(schedule="0 */15 * * * *", arg_name="myTimer", run_on_startup=True,
               use_monitor=False) 
 def makePrediction(myTimer: func.TimerRequest) -> None:
     logging.info('Python timer trigger function executed.')
@@ -43,8 +46,11 @@ def makePrediction(myTimer: func.TimerRequest) -> None:
         last_timestamp = latest_data_df['timestamp'].iloc[-1]
         latest_data_df = latest_data_df.drop(columns='timestamp')
 
+        logging.info(f"Making prediction for square with UUID: {folder}")
         predictions = make_prediction(model, latest_data_df, last_timestamp)
         predictions["squareUUID"] = folder.split('/')[0]
+
+        logging.info(f"Sending predictions to business app")
         send_predictions_to_BA(predictions)
 
 
@@ -96,6 +102,7 @@ def get_latest(df):
             return temp_df
 
 def temp_get_latest(df):
+    logging.warning(f"Getting latest data")
     # Takes the data from 8:50 to 17:20 on 7th December 2023 (a time interval where we
     # have enough data for each square)
     start_timestamp = '2023-12-07 08:50:00'
@@ -110,9 +117,20 @@ def temp_get_latest(df):
     return filtered_df
 
 def get_model(blob_service_client, folder):
-    model_pickle_data = download_model_to_file(blob_service_client, "model", f"{folder}/model.pkl")
-    # Load the model from the pickle file
-    model = pickle.loads(model_pickle_data)
+    blob_client = blob_service_client.get_blob_client(container="model", blob=f"{folder}/model.h5")
+
+    logging.warning(f"Attempting to download blob for {folder}/model.h5")
+    downloader = blob_client.download_blob(0)
+    logging.warning(f"Blob downloaded successfully")
+
+    with BytesIO() as f:
+        downloader.readinto(f)
+        with h5py.File(f, 'r') as h5file:
+            logging.warning(f"Attempting to load model from h5 file")
+            model = load_model(h5file)
+            model.summary()
+            logging.warning(f"Model loaded successfully from Blob Storage for folder: {folder}")
+
     return model
 
 def download_model_to_file(blob_service_client, container_name, blob_name):
@@ -168,6 +186,10 @@ def make_prediction(model, latest_data_df, last_timestamp):
     indices_to_select = [11, 35, -1]  # List of indices to select
 
     predictions_final_df = prediction_df.iloc[indices_to_select]
+    try:
+        prediction_df[prediction_df['HUMIDITY'] > 100] = 100
+    except KeyError:
+        pass
 
     time_made = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     predictions_final_df["timeMade"] = time_made
@@ -193,10 +215,10 @@ def send_predictions_to_BA(predictions):
     df_melted = pd.melt(predictions, id_vars=['timestamp', 'timeMade', 'squareUUID'], var_name='valueType', value_name='value')
     # connect to rabbitmq using the right credentials
     connection_params = pika.ConnectionParameters(
-        host='localhost',
-        port=5673,
-        virtual_host='/',
-        credentials=pika.PlainCredentials('myuser', 'mypassword')
+        host='goose.rmq2.cloudamqp.com',
+        port=5672,
+        virtual_host='ljbtjfzn',
+        credentials=pika.PlainCredentials('ljbtjfzn', 'v6hsm9rB5nI8FQnMQxRZUug081s_zPA3')
     )
 
     connection = pika.BlockingConnection(connection_params)
